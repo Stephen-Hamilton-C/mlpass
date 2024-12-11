@@ -1,4 +1,5 @@
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Tuple
 
@@ -7,11 +8,13 @@ import numpy as np
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Embedding, LSTM, Dense
 
-VOCABULARY = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890~`!@#$%^&*()[]{}-_+=\\|;:'\"/?,.<>"
+VOCABULARY = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890~`!@#$%^&*()[]{}-_+=\\|;:'\"/?,.<> "
 VOCAB_SIZE = max([ord(char) for char in VOCABULARY]) + 1
 
 KAGGLE_DIR = Path("kaggle")
 PWLDS_DIR = Path("pwlds")
+DATA_DIR = Path("data")
+MODELS_DIR = Path("models")
 
 
 def _split_data(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -45,16 +48,22 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 class Machine:
     def __init__(self, *, load_path: str = None, max_length=256):
-        self.charCount = None
+        self.loaded_from_file = False
         self.truncated_password_flag = False
         self.illegal_char_flag = False
         self.load_path = load_path
         self.max_length = max_length
 
-        if load_path is not None and os.path.isfile(load_path):
-            self.model = load_model(load_path)
-            self.loaded_from_file = True
-        else:
+        if load_path is not None:
+            model_path = MODELS_DIR.joinpath(load_path)
+            if model_path.suffix != ".keras":
+                model_path = model_path.with_suffix(".keras")
+
+            if model_path.is_file():
+                self.model = load_model(model_path)
+                self.loaded_from_file = True
+
+        if not self.loaded_from_file:
             self._create_model()
             self.loaded_from_file = False
 
@@ -66,7 +75,7 @@ class Machine:
         self.model.add(Dense(5, activation='softmax'))
 
         self.model.compile(
-            optimizer="adam",
+            optimizer="rmsprop",
             loss="sparse_categorical_crossentropy",
             metrics=["accuracy"]
         )
@@ -75,7 +84,6 @@ class Machine:
         chars = []
         for char in str(password):
             if char not in VOCABULARY:
-                self.illegal_char_flag = True
                 continue
             char_value = ord(char)
             chars.append(char_value)
@@ -89,21 +97,36 @@ class Machine:
         return np.array(chars)
 
     def save(self):
-        model_path = self.load_path
-        if self.load_path is None:
-            num = 0
-            os.makedirs("models", exist_ok=True)
-            while os.path.exists(f"models/mlpass{num}.h5"):
-                num += 1
-            model_path = f"models/mlpass{num}.h5"
+        try:
+            model_path = MODELS_DIR.joinpath(self.load_path)
+            if self.load_path is None:
+                num = 0
+                os.makedirs(MODELS_DIR, exist_ok=True)
+                while MODELS_DIR.joinpath(f"mlpass{num}.keras").exists():
+                    num += 1
+                model_path = MODELS_DIR.joinpath(f"mlpass{num}.keras")
 
-        if not model_path.endswith(".h5"):
-            model_path += ".h5"
+            if model_path.suffix != ".keras":
+                model_path.with_suffix(".keras")
 
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        self.model.save(model_path)
+            os.makedirs(str(model_path.parent), exist_ok=True)
+            self.model.save(model_path)
+        except IOError:
+            print("Failed to save model!")
 
     def _prepare_data(self):
+        train_x_path = DATA_DIR.joinpath("train_x.npy")
+        train_y_path = DATA_DIR.joinpath("train_y.npy")
+        test_x_path = DATA_DIR.joinpath("test_x.npy")
+        test_y_path = DATA_DIR.joinpath("test_y.npy")
+        if train_x_path.is_file() and train_y_path.is_file() and test_x_path.is_file() and test_y_path.is_file():
+            print("Found previously encoded dataset. Loading from file...")
+            self.train_x = np.load(train_x_path)
+            self.train_y = np.load(train_y_path)
+            self.test_x = np.load(test_x_path)
+            self.test_y = np.load(test_y_path)
+            return
+
         self.train_data, self.test_data = load_data()
         print("Loaded datasets")
         self.train_x = np.array(self.train_data["Password"])
@@ -113,14 +136,24 @@ class Machine:
         print("Split datasets into training and test data")
 
         print("Encoding dataset...")
-        print(self.train_x)
-        print(self.test_x)
         self.train_x = np.array([self._encode(x) for x in self.train_x])
         self.test_x = np.array([self._encode(x) for x in self.test_x])
-        print("Encoded dataset")
+        print("Saving dataset to file...")
+        try:
+            np.save(train_x_path, self.train_x)
+            np.save(train_y_path, self.train_y)
+            np.save(test_x_path, self.test_x)
+            np.save(test_y_path, self.test_y)
+        except IOError:
+            print("Failed to save dataset to file. Continuing...")
 
     def train(self, epochs: int):
+        if self.loaded_from_file:
+            print("This model has already been loaded from a file! Skipping the training step...")
+            return
+
         self._prepare_data()
+        print(self.train_x, self.train_y, self.test_x, self.test_y)
         self.model.fit(
             x=self.train_x,
             y=self.train_y,
@@ -140,17 +173,35 @@ class Machine:
         # i at this point is now the total number of items in the dataset
         return correct / i
 
-    def predict(self, password: str) -> int:
-        return self.model.predict(self._encode(password))
+    def predict(self, passwords: Iterable[str]) -> int:
+        encoded_passwords = np.array([self._encode(pwd) for pwd in passwords])
+        category_predictions = self.model.predict(encoded_passwords)
+        predictions = []
+        print(category_predictions)
+        for cat_pred in category_predictions:
+            max_pred = 0
+            max_pred_i = 0
+            for i, pred in enumerate(cat_pred):
+                if pred > max_pred:
+                    max_pred = pred
+                    max_pred_i = i
+            predictions.append(max_pred_i)
+        return predictions
 
 
 if __name__ == "__main__":
-    machine = Machine(load_path="test.h5", max_length=256)
+    # Problem with this approach: The algorithm thinks passwords with more null characters are better, rather than ignoring null characters.
+    # Perhaps we should try tokenization again...
+    machine = Machine(load_path="sparse-cat-cross_rmsprop_5.keras", max_length=256)
     print("Training...")
     machine.train(5)
-    print("Validating...")
-    accuracy = machine.validate()
-    print(f"Accuracy: {round(accuracy * 100, 2)}%")
+    print("Saving model to file...")
+    machine.save()
+    print("Predict test...")
+    print(machine.predict(["1234", "Password", "Th!$ i$ my SUPER ultr@ m3g5 CR4ZY P5SSW0R8 64"]))
+    # print("Validating...")
+    # accuracy = machine.validate()
+    # print(f"Accuracy: {round(accuracy * 100, 2)}%")
 
     if machine.truncated_password_flag:
         print(
@@ -159,4 +210,3 @@ if __name__ == "__main__":
         print(
             f"WARNING: At least 1 password used an illegal character! Consider updating your vocabulary ({VOCABULARY})")
 
-    machine.save()
