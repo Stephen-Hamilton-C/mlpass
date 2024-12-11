@@ -1,4 +1,6 @@
-# cs4824-project
+# MLPass
+
+Machine learning class final project
 
 ## Setup
 
