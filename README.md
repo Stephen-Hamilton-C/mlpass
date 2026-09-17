@@ -1,3 +1,7 @@
+# Archived - 2026-09-17
+All repositories have been transferred to a personally-run repository.
+This remains up for legacy purposes.
+
 # MLPass
 
 Machine learning class final project
